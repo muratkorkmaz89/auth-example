@@ -12,7 +12,6 @@ import java.security.Principal;
 public class ExampleController {
 
     @RequestMapping(method = RequestMethod.GET, produces = MediaType.APPLICATION_JSON_VALUE)
-    @ResponseBody
     @PreAuthorize("hasAuthority('exampleRole')")
     public String example(Principal principal){
         UsernamePasswordAuthenticationToken usernamePasswordAuthenticationToken = (UsernamePasswordAuthenticationToken) principal;
