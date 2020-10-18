@@ -1,10 +1,11 @@
-package de.muro889.authexample.controller.filter;
+package de.muro889.authexample.config;
 
-import com.auth0.jwk.JwkException;
-import com.auth0.jwk.JwkProvider;
-import com.auth0.jwk.JwkProviderBuilder;
+
 import de.muro889.authexample.model.UserPrincipal;
-import io.jsonwebtoken.*;
+import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.Jws;
+import io.jsonwebtoken.JwtParser;
+import io.jsonwebtoken.Jwts;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
@@ -21,32 +22,19 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.security.Key;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 public class JWTAuthenticationFilter extends BasicAuthenticationFilter {
 
     private final JwtParser jwtParser;
 
-    private final JwkProvider provider;
-
-    private URL wellKnownUrl = new URL("https://<keycloak-url>/sec-api/auth/realms/<realm>/protocol/openid-connect/certs");
-
-
-    public JWTAuthenticationFilter(AuthenticationManager authenticationManager) throws MalformedURLException {
+    public JWTAuthenticationFilter(AuthenticationManager authenticationManager) throws UnsupportedEncodingException {
         super(authenticationManager);
-        provider = new JwkProviderBuilder(wellKnownUrl)
-                .cached(10, 24, TimeUnit.HOURS)
-                .build();
-
-        jwtParser = Jwts.parserBuilder().setSigningKeyResolver(new MyResolver()).build();
+        jwtParser = Jwts.parserBuilder().setSigningKey("Yn2kjibddFAWtnPJ2AFlL8WXmohJMCvigQggaEypa5E=".getBytes("UTF-8")).build();
     }
 
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
@@ -90,16 +78,5 @@ public class JWTAuthenticationFilter extends BasicAuthenticationFilter {
             return Set.of();
         }
         return realm_access.get("roles").stream().map(role -> new SimpleGrantedAuthority(role)).collect(Collectors.toSet());
-    }
-
-    class MyResolver extends SigningKeyResolverAdapter {
-
-        public Key resolveSigningKey(JwsHeader header, Claims claims) {
-            try {
-                return provider.get(header.getKeyId()).getPublicKey();
-            } catch (JwkException e) {
-                throw new RuntimeException("Failed to get public key.", e);
-            }
-        }
     }
 }

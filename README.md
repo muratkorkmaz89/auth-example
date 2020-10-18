@@ -187,11 +187,143 @@ public class JWTAuthenticationFilter extends BasicAuthenticationFilter {
 }
 ```
 
-Wenn ihr jetzt wir nun den Test starten, sollte dieser Fehlschlagen. 
+Da wir jetzt jeden Token validieren, wird unser Test fehlschlagen. Deshalb müssen wir den Test nun so erweitern,dass jeder Request den wir an unsere Applikation senden einen Authorization Header mit einem validen JWT beinhaltet. Da ich die Tests gerne so lose wie möglich schreiben möchte (also am besten ohne das ein Aufruf an Keycloak notwendig wird), werde ich in meinem Tests einen neuen FIlter schreiben. In dem Filter werde ich dafür vom produktiv code etwas abweichen. In dem Filter werde ich um eine lose Kopplung gewährleisten zu können eine symetrische Verschlüsselung verwenden. Dafür brauchen wir eine WebSecurityConfig in unseren Test in der wir unseren Filter hinzufügen.Wir erstellen also eine WebSecurityConfig die genau die selbe Konfiguration wie unser Produktivcode beinhaltet, nur das hier der Filter aus den Tests verwendet wird:
 
-//TODO test erweitern
+```java
+@EnableWebSecurity
+@Configuration
+public class WebSecurityConfig extends WebSecurityConfigurerAdapter {
+
+    @Override
+    protected void configure(HttpSecurity http) throws Exception {
+        http
+                .csrf()
+                .disable()
+                .authorizeRequests()
+                .antMatchers("/**")
+                .authenticated().and()
+                .addFilter(new JWTAuthenticationFilter(authenticationManager())) //Filter aus der test package
+                .sessionManagement()
+                .sessionCreationPolicy(SessionCreationPolicy.STATELESS);
+    }
+}
+```
 
 
+Unser TestFilter sieht wie folgt aus:
+
+```java
+
+public class JWTAuthenticationFilter extends BasicAuthenticationFilter {
+
+    private final JwtParser jwtParser;
+
+    public JWTAuthenticationFilter(AuthenticationManager authenticationManager) throws UnsupportedEncodingException {
+        super(authenticationManager);
+        jwtParser = Jwts.parserBuilder().setSigningKey("Yn2kjibddFAWtnPJ2AFlL8WXmohJMCvigQggaEypa5E=".getBytes("UTF-8")).build();
+    }
+
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
+                                    FilterChain filterChain) throws IOException, ServletException {
+        final String header = request.getHeader("Authorization");
+
+        if (StringUtils.isEmpty(header) || !header.startsWith("Bearer ")) {
+            filterChain.doFilter(request, response);
+            return;
+        }
+        final Authentication authentication = getAuthentication(header);
+        SecurityContextHolder.getContext().setAuthentication(authentication);
+        filterChain.doFilter(request, response);
+    }
+
+    private Authentication getAuthentication(String authorizationHeader) {
+        try{
+            final String token = authorizationHeader.replace("Bearer ", "");
+
+            final Jws<Claims> claimsJws = jwtParser.parseClaimsJws(token);
+
+            final Claims body = claimsJws.getBody();
+            final String exampleClaim = body.get("exampleClaim", String.class);
+            final LinkedHashMap<String, List<String>> realm_access = claimsJws.getBody().get("realm_access", LinkedHashMap.class);
+            final UserPrincipal userPrincipal = new UserPrincipal(exampleClaim, extractRoles(realm_access));
+            return new UsernamePasswordAuthenticationToken(userPrincipal, null, getGrantedAuthorities(realm_access));
+        }catch(Exception e){
+            return new UsernamePasswordAuthenticationToken(null, null);
+        }
+    }
+
+    private Set<String> extractRoles(LinkedHashMap<String, List<String>> realm_access){
+        if (CollectionUtils.isEmpty(realm_access) || !realm_access.containsKey("roles")){
+            return Set.of();
+        }
+        return new HashSet<>(realm_access.get("roles"));
+    }
+
+    private Set<GrantedAuthority> getGrantedAuthorities(LinkedHashMap<String, List<String>> realm_access) {
+        if (CollectionUtils.isEmpty(realm_access) || !realm_access.containsKey("roles")){
+            return Set.of();
+        }
+        return realm_access.get("roles").stream().map(role -> new SimpleGrantedAuthority(role)).collect(Collectors.toSet());
+    }
+}
+
+```
+
+Wie ihr in dem folgenden Beispiel sieht, haben wir hier einen symetrischen Schlüssel verwendet: 
+
+```java
+jwtParser = Jwts.parserBuilder().setSigningKey("Yn2kjibddFAWtnPJ2AFlL8WXmohJMCvigQggaEypa5E=".getBytes("UTF-8")).build();
+```
+
+Den gleichen Schlüssel können wir benutzen um in den Tests ein JWT zu signieren. Um das zu tun, implementieren wir noch eine helper Klasse, welche uns einen JWT generiert und auch mit dem symetrischen Schlüssel signiert:
+
+```java
+public class JwtHelper {
+
+    private static final long EXPIRATIONTIME = 864_000_000; // 10 days
+
+    public static String createToken(String exampleRole, String exampleClaim) {
+
+        byte[] apiKeySecretBytes = new byte[0];
+        try {
+            apiKeySecretBytes = "Yn2kjibddFAWtnPJ2AFlL8WXmohJMCvigQggaEypa5E=".getBytes("UTF-8");
+        } catch (UnsupportedEncodingException e) {
+            e.printStackTrace();
+        }
+        Key signingKey = new SecretKeySpec(apiKeySecretBytes, SignatureAlgorithm.HS256.getJcaName());
+
+        Map<String, List<String>> realmroles = new HashMap<>();
+
+        List<String> roles = List.of(exampleRole);
+
+        realmroles.put("roles", roles);
+
+        String jwt = Jwts.builder()
+                .claim("exampleClaim", exampleClaim)
+                .claim("realm_access",realmroles)
+                .setExpiration(new Date(System.currentTimeMillis() + EXPIRATIONTIME))
+                .signWith(signingKey, SignatureAlgorithm.HS256)
+                .compact();
+
+        return "Bearer " + jwt;
+    }
+}
+```
+
+
+Nachdem wir nun auch in der Lage sind JWT zu generieren, können wir nun unseren Test erweitern:
+
+```java
+@Test
+void testAccessSecuredEndpoint_validJWT() {
+    String exampleClaim = "HelloWorld";
+    String jwt = JwtHelper.createToken("exampleRole", exampleClaim);
+    final JsonNode response = with().given().header("Authorization", jwt).port(port).when().request("GET", "/").then().statusCode(HttpStatus.OK.value()).extract().body().as(JsonNode.class);
+    assertThat(response.get("message").textValue()).isEqualTo(exampleClaim);
+}
+```
+
+In dem Beispiel fügen wir beispielhaft eine claim hinzu und fügen den JWT in unseren Authorization Header hinzu. Jetzt sollte dieser Test wieder erfolgreich durchlaufen.
 
 
 ## Authorisierung
