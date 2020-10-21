@@ -225,45 +225,15 @@ public class JWTAuthenticationFilter extends BasicAuthenticationFilter {
 
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                     FilterChain filterChain) throws IOException, ServletException {
+        LOGGER.debug("received request: {}", request.getMethod());
         final String header = request.getHeader("Authorization");
 
         if (StringUtils.isEmpty(header) || !header.startsWith("Bearer ")) {
             filterChain.doFilter(request, response);
             return;
         }
-        final Authentication authentication = getAuthentication(header);
-        SecurityContextHolder.getContext().setAuthentication(authentication);
+        jwtParser.isSigned(token);
         filterChain.doFilter(request, response);
-    }
-
-    private Authentication getAuthentication(String authorizationHeader) {
-        try{
-            final String token = authorizationHeader.replace("Bearer ", "");
-
-            final Jws<Claims> claimsJws = jwtParser.parseClaimsJws(token);
-
-            final Claims body = claimsJws.getBody();
-            final String exampleClaim = body.get("exampleClaim", String.class);
-            final LinkedHashMap<String, List<String>> realm_access = claimsJws.getBody().get("realm_access", LinkedHashMap.class);
-            final UserPrincipal userPrincipal = new UserPrincipal(exampleClaim, extractRoles(realm_access));
-            return new UsernamePasswordAuthenticationToken(userPrincipal, null, getGrantedAuthorities(realm_access));
-        }catch(Exception e){
-            return new UsernamePasswordAuthenticationToken(null, null);
-        }
-    }
-
-    private Set<String> extractRoles(LinkedHashMap<String, List<String>> realm_access){
-        if (CollectionUtils.isEmpty(realm_access) || !realm_access.containsKey("roles")){
-            return Set.of();
-        }
-        return new HashSet<>(realm_access.get("roles"));
-    }
-
-    private Set<GrantedAuthority> getGrantedAuthorities(LinkedHashMap<String, List<String>> realm_access) {
-        if (CollectionUtils.isEmpty(realm_access) || !realm_access.containsKey("roles")){
-            return Set.of();
-        }
-        return realm_access.get("roles").stream().map(role -> new SimpleGrantedAuthority(role)).collect(Collectors.toSet());
     }
 }
 
@@ -327,3 +297,170 @@ In dem Beispiel fügen wir beispielhaft eine claim hinzu und fügen den JWT in u
 
 
 ## Authorisierung
+
+In vielen Fällen reicht eine Authentifizierung nicht aus. Oft ist man in der Situation, dass man einige Endpunkte nur für bestimmte Benutzergruppen zur Verfügung stellen möchte. In diesem Abschnitt möchte ich zeigen wie das mit einigen Erweiterungen möglich ist. 
+
+Dafür erweitern wir zunächst unseren JWTAuthenticationFilter wie folgt:
+
+```java
+public class JWTAuthenticationFilter extends BasicAuthenticationFilter {
+
+    private final JwtParser jwtParser;
+
+    private final JwkProvider provider;
+
+    private URL wellKnownUrl = new URL("https://<keycloak-url>/sec-api/auth/realms/<realm>/protocol/openid-connect/certs");
+
+
+    public JWTAuthenticationFilter(AuthenticationManager authenticationManager) throws MalformedURLException {
+        super(authenticationManager);
+        provider = new JwkProviderBuilder(wellKnownUrl)
+                .cached(10, 24, TimeUnit.HOURS)
+                .build();
+
+        jwtParser = Jwts.parserBuilder().setSigningKeyResolver(new MyResolver()).build();
+    }
+
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
+                                    FilterChain filterChain) throws IOException, ServletException {
+        final String header = request.getHeader("Authorization");
+
+        if (StringUtils.isEmpty(header) || !header.startsWith("Bearer ")) {
+            filterChain.doFilter(request, response);
+            return;
+        }
+        final Authentication authentication = getAuthentication(header);
+        SecurityContextHolder.getContext().setAuthentication(authentication);
+        filterChain.doFilter(request, response);
+    }
+
+    private Authentication getAuthentication(String authorizationHeader) {
+        try{
+            final String token = authorizationHeader.replace("Bearer ", "");
+
+            final Jws<Claims> claimsJws = jwtParser.parseClaimsJws(token);
+
+            final Claims body = claimsJws.getBody();
+            final String exampleClaim = body.get("exampleClaim", String.class);
+            final LinkedHashMap<String, List<String>> realm_access = claimsJws.getBody().get("realm_access", LinkedHashMap.class);
+            final UserPrincipal userPrincipal = new UserPrincipal(exampleClaim, extractRoles(realm_access));
+            return new UsernamePasswordAuthenticationToken(userPrincipal, null, getGrantedAuthorities(realm_access));
+        }catch(Exception e){
+            return new UsernamePasswordAuthenticationToken(null, null);
+        }
+    }
+
+    private Set<String> extractRoles(LinkedHashMap<String, List<String>> realm_access){
+        if (CollectionUtils.isEmpty(realm_access) || !realm_access.containsKey("roles")){
+            return Set.of();
+        }
+        return new HashSet<>(realm_access.get("roles"));
+    }
+
+    private Set<GrantedAuthority> getGrantedAuthorities(LinkedHashMap<String, List<String>> realm_access) {
+        if (CollectionUtils.isEmpty(realm_access) || !realm_access.containsKey("roles")){
+            return Set.of();
+        }
+        return realm_access.get("roles").stream().map(role -> new SimpleGrantedAuthority(role)).collect(Collectors.toSet());
+    }
+
+    class MyResolver extends SigningKeyResolverAdapter {
+
+        public Key resolveSigningKey(JwsHeader header, Claims claims) {
+            try {
+                return provider.get(header.getKeyId()).getPublicKey();
+            } catch (JwkException e) {
+                throw new RuntimeException("Failed to get public key.", e);
+            }
+        }
+    }
+}
+```
+
+Wie ihr sehen könnt rufen wir nicht mehr die folgende Methode auf:
+
+```java
+jwtParser.isSigned(token);
+```
+
+Stattdessen möchten wir nun das JWT parsen und mit den darin enthalten claims arbeiten. Dafür schreiben wir die neue Methode "getAuthentication":
+
+```java
+private Authentication getAuthentication(String authorizationHeader) {
+    try{
+        final String token = authorizationHeader.replace("Bearer ", "");
+
+        final Jws<Claims> claimsJws = jwtParser.parseClaimsJws(token);
+
+        final Claims body = claimsJws.getBody();
+        final String exampleClaim = body.get("exampleClaim", String.class);
+        final LinkedHashMap<String, List<String>> realm_access = claimsJws.getBody().get("realm_access", LinkedHashMap.class);
+        final UserPrincipal userPrincipal = new UserPrincipal(exampleClaim, extractRoles(realm_access));
+        return new UsernamePasswordAuthenticationToken(userPrincipal, null, getGrantedAuthorities(realm_access));
+    }catch(Exception e){
+        return new UsernamePasswordAuthenticationToken(null, null);
+    }
+}
+```
+
+Um an die claims zu kommen können wir die Methode 
+
+```java
+jwtParser.parseClaimsJws(token);
+```
+
+aufrufen. Mit dieser Methode gelangen wir nicht nur an die claims, durch diesen Methoden aufruf wird auch unser JWT validiert und der User damit authentifiziert. Nachdem wir die claims haben möchten wir in diesem Beispiel die Rollen aus dem "realm_access" claim in unsere neue Entität "UserPrincipal" hinzufügen. Dies machen wir mit der Methode "extractRoles":
+
+```java
+private Set<String> extractRoles(LinkedHashMap<String, List<String>> realm_access){
+    if (CollectionUtils.isEmpty(realm_access) || !realm_access.containsKey("roles")){
+        return Set.of();
+    }
+    return new HashSet<>(realm_access.get("roles"));
+}
+```
+
+Aber interessant für die Authorisierung wird es der nächste Schritt. Wir möchten basierend auf den Rollen "GrantedAuthorities" erstellen und diese dann in unsere Authentication Objekt hinzufügen:
+
+```java
+...
+return new UsernamePasswordAuthenticationToken(userPrincipal, null, getGrantedAuthorities(realm_access));
+...
+
+private Set<GrantedAuthority> getGrantedAuthorities(LinkedHashMap<String, List<String>> realm_access) {
+    if (CollectionUtils.isEmpty(realm_access) || !realm_access.containsKey("roles")){
+        return Set.of();
+    }
+    return realm_access.get("roles").stream().map(role -> new SimpleGrantedAuthority(role)).collect(Collectors.toSet());
+}
+```
+
+Nachdem wir die "GrantedAuthorities" hinzugefügt haben können wir nun in unserem Rest-Endpunkt die folgende Anotation nutzen:
+
+```java
+@PreAuthorize("hasAuthority('exampleRole')")
+```
+
+Beispielsweise könnte der RestController also wie folgt aussehen:
+
+```java
+@RestController
+public class ExampleController {
+
+    @RequestMapping(method = RequestMethod.GET, produces = MediaType.APPLICATION_JSON_VALUE)
+    @PreAuthorize("hasAuthority('exampleRole')")
+    public String example(Principal principal){
+        UsernamePasswordAuthenticationToken usernamePasswordAuthenticationToken = (UsernamePasswordAuthenticationToken) principal;
+        final UserPrincipal userPrincipal = (UserPrincipal) usernamePasswordAuthenticationToken.getPrincipal();
+
+        String response = "{\"message\" : \"" + userPrincipal.getExampleClaim() + "\"}";
+
+        return response;
+    }
+
+}
+```
+
+Das heißt jeder Request benötigt erstmal ein valides JWT damit wir den User Authentifizieren können. Außerdem muss das JWT eine claim mit dem Namen "realm_access" beinhalten, in der die Rolle "exampleRole" enthalten ist. Nur dann ist man in der Lage den Endpunkt zu erreichen.
+
+In dem Abschnitt der Authentifizierung haben wir bereits einen JWTHelper implementiert. DIeser fügt bereits die beispielhafte Rolle hinzu. Dadurch ist sollte der Test also erfolgreich durchlaufen. Testet es gerne mal aus und entferntt auch mal die Rolle. Dann sollte der Test nicht erfolgreich sein.
